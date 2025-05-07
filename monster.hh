@@ -2,7 +2,7 @@
 
 #include "tile.hh"
 
-class Monster {
+class Monster : public Tile {
 public:
     Monster() = delete;
     virtual ~Monster() = default;
