@@ -1,0 +1,1845 @@
+I am working on a clone of Chip's Challenge to try to apply the things I've learned about object-oriented design, especially design patterns. I think the original MS port was built in assembly (but I could be wrong), but I am just using C++, and I am wanting to use Qt for the UI. I am also wanting to make it into a sort of toolkit for extending the CC system, say with custom tilesets and rulesets, to try to simplify the process of making these tile-based kinds of games. My first few thoughts are to have abstract factories for rulesets--to generate ruleset-based mechanics (strategy pattern?) when needed--and tilesets--to get graphics and available tiles. I know that the tile board should also have just two layers, but it might be worthwhile to make that an implementation detail for cases where there are different numbers of layers or dynamic numbers. Also, there are certain advanced mechanics that arise from glitches in the rulesets, and I am wondering if those should be hardcoded in, fixed, or if there should be a sort of extensibility plugin feature that allows for those differences, possibly through the use of the template method pattern? It seems like a large system, and I am not sure I can untangle it all on my own
+You can untangle it. The key is to avoid designing “Chip’s Challenge, but generic” all at once. Design a small, solid core for one working ruleset, then make the extension seams explicit.
+What you’re describing is really three systems that should not be too tightly coupled:
+Core tile-world engine
+Board state, entities, movement, collisions, turns/ticks, save/load of level state.
+Ruleset layer
+What counts as walkable, how monsters move, what keys unlock, how buttons affect traps, timing quirks, win/loss conditions, and even glitch behavior.
+Presentation/content layer
+Qt UI, rendering, sound, tilesets, editor tooling, asset metadata.
+If you separate those cleanly, the project becomes much more manageable.
+The most important design decision
+Do not make every tile class contain all of its own behavior in a big OOP hierarchy. That tends to look elegant at first, then becomes painful once interactions multiply.
+For a Chip’s Challenge style game, a better mental model is:
+the board stores state
+the ruleset interprets that state
+the renderer displays that state
+So instead of “a FireTile object decides everything,” prefer something closer to:
+tile/entity IDs or data objects represent what exists
+rules/services decide what happens when things interact
+That makes it much easier to swap rulesets without rewriting the whole engine.
+A good high-level architecture
+A practical architecture could look like this:
+Core domain
+GameSession
+LevelState
+Board
+Cell
+Actor / Entity
+Position, Direction
+TileInstance
+Inventory
+TickResult / GameEvent
+These should be mostly UI-agnostic and ruleset-agnostic.
+Ruleset API
+IRuleset
+IRulesetFactory
+IMovementPolicy
+IInteractionResolver
+IWinCondition
+IEntityBehavior
+ITurnScheduler
+You do not necessarily need each of these as separate interfaces on day one, but this is the direction.
+Content API
+ITileset
+ITilePalette
+IAssetResolver
+IRulesetMetadata
+level serializers/loaders
+UI/editor
+Qt board view
+sprite/tileset rendering
+input controller
+editor tools
+inspector/palette/property panes
+About abstract factories
+Your instinct about abstract factories is good, but I would narrow their job.
+Use factories for assembling a family of related components, not for every little mechanic.
+For example:
+CC1RulesetFactory creates:
+movement policy
+interaction resolver
+monster AI behaviors
+win/loss evaluator
+timing scheduler
+CC2RulesetFactory creates a different family
+That is a very natural use of Abstract Factory.
+For tilesets, likewise:
+ClassicTilesetFactory
+ModernTilesetFactory
+CustomModTilesetFactory
+Each provides graphics, animation metadata, palette definitions, maybe editor grouping.
+That said, graphics and mechanics should not be entangled. A tileset should not decide game logic.
+Strategy pattern: yes, but in the right places
+Yes, strategy fits well, especially for things like:
+movement rules
+collision resolution
+monster decision logic
+button/switch linkage semantics
+tile animation timing
+win condition evaluation
+For example, instead of hardcoding monster movement in monster subclasses, you might have:
+BugMovementStrategy
+TeethMovementStrategy
+WalkerMovementStrategy
+Then the ruleset decides which strategy an entity uses.
+This is cleaner than baking behavior into a giant inheritance tree.
+Two layers on the board
+You are thinking about this in a healthy way.
+I would not hardcode the whole engine around “exactly two layers,” even if classic CC uses that model. But I also would not make the board infinitely abstract from the start.
+A good compromise is:
+expose the board through an interface like IBoardModel or Board
+internally support a small ordered collection of layers
+allow rulesets to declare expected layer semantics
+For example:
+ruleset A may use:
+terrain layer
+actor layer
+ruleset B may use:
+ground
+item
+actor
+overlay
+Then the classic two-layer model becomes a configuration/contract of a ruleset, not a universal assumption.
+You could even define:
+LayerRole::Terrain
+LayerRole::Item
+LayerRole::Actor
+LayerRole::Overlay
+That gives structure without locking you down.
+Glitches and advanced mechanics
+This is one of the most interesting parts, and it strongly suggests you should separate intended mechanics from execution semantics.
+Do not scatter glitch-specific conditionals everywhere. Instead, treat them as part of a rule profile.
+For example:
+CC1StrictProfile
+CC1MSProfile
+CC1WithKnownGlitchesProfile
+CustomRulesProfile
+A rules profile could specify:
+movement update order
+collision precedence
+simultaneous vs sequential resolution
+whether specific overflow/ordering quirks are reproduced
+whether certain historical bugs are emulated or fixed
+This is better than calling them “plugins” right away. First model them as configurable semantics inside the rules engine.
+Then later, if you want, expose plugin hooks.
+Template Method: maybe, but use sparingly
+Template Method can help when there is a fixed algorithm skeleton with variant steps. For example:
+resolve tick
+gather intents
+sort actors
+apply movement
+resolve interactions
+update board effects
+check win/loss
+A base RulesetTickProcessor might define that overall flow, while derived classes override specific steps.
+That is reasonable.
+But I would not lean too heavily on Template Method for extensibility, because it tends to push you into inheritance-heavy design. For a toolkit/modding system, composition usually scales better than inheritance.
+So:
+use Template Method for a few stable pipelines
+use Strategy / composition for most behavior variation
+A better extensibility model than “everything is a plugin”
+Plugins are appealing, but full plugin architectures are expensive to get right early.
+Instead, think in levels of extensibility:
+Level 1: data-driven
+Allow custom tilesets, tile metadata, level files, entity definitions, and maybe editor palettes through JSON/XML/YAML.
+Level 2: scripted/custom rule hooks
+Allow mods to define behaviors through a scripting layer or declarative rule language.
+Level 3: native plugins
+Allow compiled extensions that implement interfaces.
+For your project, Level 1 plus maybe some Level 2 hooks is probably enough at first.
+Native plugin systems in C++ can get messy fast:
+ABI issues
+versioning
+dynamic loading headaches
+platform-specific behavior
+If you want a “toolkit,” a data-driven engine with well-defined rule hooks often gives most of the benefit without the pain.
+A clean way to model gameplay
+One strong approach is to make each tick proceed through a predictable pipeline:
+collect player input
+ask each actor for an intended action
+validate actions under the current ruleset
+resolve conflicts/interactions
+mutate board state
+emit gameplay events
+let UI animate/render those events
+That leads nicely to patterns like:
+Command for actions/intents
+Observer/Event Bus for reporting state changes to UI/editor/replay systems
+Strategy for rule variation
+Abstract Factory for assembling ruleset families
+State in a few places if entities have modes
+Prototype if you want reusable entity/tile templates from content definitions
+This is more robust than having the UI directly poke the game state.
+Consider an event-based core
+This kind of game benefits a lot from explicit events, such as:
+actor moved
+item collected
+door unlocked
+trap toggled
+entity killed
+chip count changed
+level completed
+Why this helps:
+Qt UI can animate from events
+sound system can subscribe to events
+replay/undo can record events or commands
+debugging becomes easier
+editor simulation becomes easier
+So a ruleset tick might return a TickResult containing:
+updated state
+list of emitted events
+status flags
+That is a very clean boundary.
+How to avoid overengineering
+You probably do not need all of these on day one:
+plugins
+multiple rulesets
+arbitrary layer counts
+full editor
+scripting
+replay
+glitch emulation profiles
+Build in this order instead:
+Phase 1
+Make one playable CC-like ruleset with:
+board
+player movement
+walls/floors
+keys/doors
+chips/socket/exit
+simple monsters
+tick/update loop
+Qt rendering
+Phase 2
+Refactor toward explicit interfaces:
+IRuleset
+ITileset
+event system
+entity behavior strategies
+Phase 3
+Add toolkit features:
+custom tilesets
+rule profiles
+editor
+data-driven content
+Phase 4
+Only then consider:
+scripting
+plugins
+multiple full rulesets
+glitch-emulation modes
+That way the abstractions are shaped by a real game, not by guesses.
+What I would recommend concretely
+If I were structuring this in C++, I would aim for these central interfaces/classes:
+GameSession
+LevelState
+Board
+IRuleset
+RulesetFactory
+ITileset
+Renderer
+GameAction
+GameEvent
+TickProcessor
+And I would make the ruleset own or provide:
+movement resolver
+interaction resolver
+turn order policy
+win/loss evaluator
+entity behavior registry
+That gives you extension points without drowning in class explosion.
+One design trap to avoid
+Do not make “tile type” and “behavior” the same thing.
+A tile may need:
+appearance
+collision properties
+triggers
+editor metadata
+serialization name
+special interaction rules
+If you put all of that into one inheritance hierarchy, it gets rigid. Prefer a composition-oriented design where tile/entity definitions can reference behavior components or IDs interpreted by the ruleset.
+One possible mental model
+Think of the engine as:
+data: what exists
+rules: what it means
+events: what happened
+renderer: how it looks
+That is the cleanest way to support both faithful emulation and creative extension.
+My strongest recommendation on the glitch question
+Do this:
+support a canonical internal engine
+allow rule profiles that change execution semantics
+treat glitches as optional compatibility modes, not as random hacks
+So instead of hardcoding “buggy behavior,” define named semantics like:
+“classic MS-compatible timing”
+“strict/fixed timing”
+“modded/custom timing”
+That makes the weirdness intentional and testable.
+Final thought
+This is a great project for learning object-oriented design, but it will teach you even more if you let yourself use data-oriented ideas and composition where they fit, instead of forcing everything into classical inheritance.
+The real win here is not “which pattern do I use,” but:
+what should vary
+what should stay stable
+where do I put the seams
+For your case:
+stable core: board state, ticks, events, serialization boundaries
+variable seams: rules, behaviors, content, rendering
+A very good next step would be to sketch a minimal class/interface diagram for just:
+Board
+LevelState
+IRuleset
+GameAction
+GameEvent
+ITileset
+and then walk one example through it, like “player moves onto key, picks it up, unlocks door later.”
+Yeah that makes sense. I learned inheritance-oriented first, so switching to composition-oriented is still difficult for me, especially since I don't do much OOP anyway. Perhaps I could even include a "workbench" app that allows one to define new tileset/ruleset profiles with a simple interface and maybe a scripting language to define new tiles/rules within the app or change existing behaviors in a copy of the base ruleset. It would have to work with existing players and editors, like Tile World, Chip's Controls, and CCLD/ChipEdit. What you were saying about intended behaviors vs behavior profiles is interesting because MSCC has most of the glitches and Tile World has some of them but patched most of them, and there is also the distinction between Lynx and Pedantic Lynx, which is supposed to be closer to the original Atari Lynx game. Will I need a system layer for portability between platforms? Oh it might be interesting to have level simulation directly in the editor as well as the option to test in external players like TW and MSCC. 
+Yes — a thin platform/system layer is a good idea, but not a giant one.
+Since you’re already using C++ + Qt, Qt will handle a lot of portability for you: windowing, input, timers, file dialogs, images, text, and general app structure. So you probably do not need a heavy separate portability framework the way an emulator or game engine from scratch might.
+What you likely do want is a small boundary between:
+engine/domain
+application/UI
+OS/Qt services
+That way your core logic does not become “the Qt game.”
+A practical layering
+I would think of it like this:
+1. Core engine layer
+Pure gameplay/domain code.
+This contains:
+board state
+entity/tile instances
+rulesets and behavior profiles
+tick simulation
+event generation
+level serialization model
+replay/test logic
+This layer should know nothing about:
+Qt widgets
+QPixmap
+QTimer
+filesystem dialogs
+platform-specific APIs
+2. Application/service layer
+Glue code that coordinates engine + tools.
+This contains:
+editor document/session management
+test-play session control
+import/export pipeline
+workbench profile loading
+scripting integration
+launching external players
+undo/redo orchestration
+This layer can depend on the engine, and can use Qt if convenient, but ideally it still keeps UI details from leaking into the engine.
+3. UI/platform layer
+Qt widgets/views and system integration.
+This contains:
+board rendering
+property panels
+palette browser
+animation playback
+menu actions
+keyboard mapping
+drag/drop
+file dialogs
+process launching
+timers/audio
+That is probably enough. So yes, a “system layer” exists, but it can stay thin.
+On portability specifically
+If you want your project to run on Windows, Linux, and maybe macOS, you can keep portability manageable by isolating just a few concerns behind interfaces:
+time/tick source
+file access / paths
+process launching
+logging
+input mapping
+optional audio backend
+Qt already covers much of this. So instead of a full “system abstraction layer,” you might just define a few small service interfaces like:
+IClock
+IFileSystem
+IProcessLauncher
+ILogger
+and provide Qt-based implementations.
+That gives you portability and testability without overbuilding.
+Your workbench idea is actually very strong
+A workbench app is a much more compelling direction than only making a player clone.
+Because then the project becomes:
+a player
+an editor
+a ruleset/tileset authoring environment
+a compatibility lab
+That is ambitious, but it also gives your abstractions a real purpose.
+I would frame the workbench around profiles and content packages.
+For example:
+Tileset profile
+Defines:
+tile IDs
+sprite sheets / animations
+editor palette groups
+optional display metadata
+mapping from logical tile kinds to assets
+Ruleset profile
+Defines:
+movement timing
+collision semantics
+actor update order
+tile interaction rules
+win/loss conditions
+compatibility flags
+optional script hooks
+Compatibility profile
+Defines:
+import/export mappings
+external player assumptions
+glitch emulation switches
+file format behavior
+This is where your intended behavior vs behavior profile distinction becomes very powerful.
+I think you should explicitly model three things
+You’ve already started circling this, and I think naming them will help:
+1. Ruleset
+“What game is this?”
+Examples:
+MSCC rules
+Lynx rules
+custom derived rules
+This is the big semantic package.
+2. Behavior profile
+“How faithfully or differently is this ruleset executed?”
+Examples:
+exact MS compatibility
+patched MS
+Tile World-style approximation
+Pedantic Lynx
+custom bugfix mode
+This controls quirks, timing, edge cases, and historical oddities.
+3. Presentation profile
+“How is it shown/edited?”
+Examples:
+classic tileset
+modern HD tileset
+editor-friendly debug tiles
+accessibility tileset
+That separation will keep things much cleaner than trying to cram all of that into one “ruleset object.”
+About compatibility with Tile World, Chip’s Controls, CCLD, ChipEdit
+This is where you want to be careful: compatibility is partly a file-format problem and partly a semantics problem.
+Those are not the same.
+File format compatibility
+This is about:
+reading/writing level packs
+metadata fields
+tile encodings
+pack naming
+password/author fields
+layer representations
+This suggests import/export adapters.
+Semantic compatibility
+This is about:
+actor timing
+movement order
+collision quirks
+trap/cloner logic
+teleport behavior
+glitch preservation
+RNG quirks if applicable
+This suggests testable ruleset/behavior profiles.
+So I would avoid saying “my editor supports Tile World” unless you specify whether you mean:
+imports TW-compatible formats
+exports levels playable in TW
+simulates TW-compatible behavior
+launches TW for testing
+Those are four different capabilities.
+Testing in external players
+That is a very good feature, but I would treat it as an integration tool, not a primary engine design constraint.
+For example, the editor/workbench could support:
+“Open in Tile World”
+“Export and test in MSCC”
+“Run in local compatibility target”
+Internally this could be something like an ExternalRunner service with configuration per target:
+executable path
+command-line format
+temporary export format
+working directory
+profile compatibility check
+That gives you external-player support without distorting your engine architecture around those programs.
+Simulation directly in the editor
+Yes — this is one of the best ideas in the whole project.
+It strongly suggests you should make the engine usable as a headless simulation core.
+That means the editor can:
+step one tick
+run/pause
+inspect state
+reset to level start
+show event traces
+maybe visualize actor intents/debug overlays
+That is hugely valuable for both creators and for your own debugging.
+It also pushes you toward the right architecture:
+editor owns a level document
+simulation creates a runtime copy of level state
+engine runs on the copy
+UI renders both static edit state and runtime preview state as needed
+So the editor and player are both clients of the same simulation core.
+That is exactly what you want.
+A really useful architectural split for the editor
+You may want to distinguish:
+LevelDefinition: the authored level data
+LevelState: the mutable runtime state during play/simulation
+That way:
+the editor edits LevelDefinition
+test play creates a LevelState from it
+simulation mutates LevelState
+reset just rebuilds from LevelDefinition
+This will save you a lot of pain.
+About scripting
+Scripting is probably the right place for custom behavior, but I would add it in stages.
+Good first use of scripting
+custom triggers
+custom tile reactions
+rule overrides at named hook points
+editor-time validation helpers
+metadata-driven behaviors
+Harder use of scripting
+replacing the whole simulation pipeline
+deep low-level movement semantics
+arbitrary mutation of engine internals
+I would not start with “scripts can do anything.” That becomes chaos fast.
+A better model is:
+base ruleset defines stable hook points
+scripts may extend or override certain decisions
+engine still controls overall lifecycle
+That fits well with your earlier Template Method thought, but in a composition-based way.
+For instance, the tick pipeline stays fixed, but certain steps call into rule/script hooks.
+Composition-oriented way to think about it
+Since shifting away from inheritance is still uncomfortable, here is a concrete reframing:
+Instead of asking:
+“What subclasses do I need?”
+ask:
+“What responsibilities vary independently?”
+For your project, these vary independently:
+how the board is stored
+how rendering works
+how a tile looks
+how a tile behaves
+how movement is resolved
+how compatibility quirks are applied
+how a level is imported/exported
+how the editor exposes palettes/tools
+how external players are launched
+Those should not all be in one inheritance tree.
+Composition says:
+make small pieces responsible for one kind of variation
+assemble them into a ruleset/app/editor
+So a custom ruleset might be built out of:
+movement resolver
+interaction resolver
+actor behavior registry
+timing policy
+compatibility profile
+hook/script registry
+That is much easier to reason about than class CustomGlitchyPedanticLynxRulesetWithPatchedTeleports : public ...
+About the behavior-profile idea
+I think this is one of the strongest abstractions in your design.
+You could think of the compatibility space as:
+Ruleset family: MS, Lynx, custom
+Behavior profile: strict, patched, pedantic, historical, experimental
+Content profile: tileset/assets/editor metadata
+Then something like “Pedantic Lynx” is not a totally separate engine. It is:
+Lynx ruleset family
+pedantic behavior profile
+Likewise:
+Tile World MS mode
+MS-style ruleset family
+TW-patched profile
+Even if the exact boundaries shift later, that mental model is very useful.
+One thing I would strongly recommend
+Build a conformance test suite early.
+Because once you care about:
+MSCC glitches
+Tile World partial fixes
+Lynx vs Pedantic Lynx
+external-player compatibility
+you are no longer just building a game — you are building a behaviorally sensitive simulator.
+That means you need tests like:
+given this level fragment and input sequence, actor ends at X
+teleport resolves in this order
+trap/cloner timing behaves this way
+block interaction succeeds/fails here
+level completes/fails on this tick
+A good setup would let each test specify:
+initial level state
+behavior profile
+input sequence
+expected final state or event trace
+This will matter more than almost any design pattern.
+My recommendation on scope
+You have a lot of very good ideas, but I would structure the roadmap like this:
+Stage 1
+Make a clean headless engine with:
+LevelDefinition
+LevelState
+IRuleset
+one concrete ruleset
+event stream
+testable tick loop
+Stage 2
+Add Qt player UI.
+Stage 3
+Add editor with in-editor simulation.
+Stage 4
+Add profile system:
+ruleset family
+behavior profile
+tileset profile
+Stage 5
+Add import/export compatibility and external-player launch.
+Stage 6
+Add workbench authoring and limited scripting.
+That order keeps the foundation from collapsing under the tool ambitions.
+Answering your portability question directly
+So: yes, but keep it small.
+You probably do not need a grand “system layer” in the traditional sense. With Qt, what you want is more like:
+a pure engine core
+a thin app/service layer
+Qt-based adapters for platform stuff
+That will give you portability, testability, and room for the editor/workbench without turning the project into architecture soup.
+Answering your editor-simulation question directly
+Yes, absolutely do it.
+In-editor simulation is one of the strongest reasons to keep your engine:
+UI-agnostic
+deterministic
+event-driven
+resettable from a LevelDefinition
+That feature will also help you debug ruleset differences and compatibility modes.
+My strongest recommendation from here
+Write down a very small first version of these concepts:
+LevelDefinition
+LevelState
+IRuleset
+BehaviorProfile
+TickResult
+GameEvent
+ExternalRunner
+and then test one scenario across them, like:
+player moves onto chip
+chip count updates
+socket opens
+player exits level
+If you want, I can help you sketch a concrete C++/Qt class layout for the engine/editor/workbench split next.
+Are there better tools than C++ and Qt for this project? Those were the first things that came to mind because I've used C++ a lot and Qt I know is often used for interfaces, but I'm not sure if they're necessarily the best choice. I think C++ is good because I can also manage efficiency more precisely too. I can imagine allowing direct changes in the level simulation to help shape the final level design and so someone wouldn't have to just remember the changes they want to make, but I'm not sure how I could incorporate that or if it would even be worth trying to implement. Maybe allowing staging of changes and then committing to the LevelDefinition (making sure that any possible overwrites are confirmed first)?
+C++ and Qt are good choices, just not the only good ones.
+For this project, the best stack depends less on raw performance and more on what kind of pain you want to accept:
+engine architecture pain
+tooling/editor pain
+cross-platform UI pain
+content/modding pain
+iteration speed pain
+For a Chip’s Challenge-style toolkit with a player, editor, simulation, import/export, and maybe scripting, the stack has to support both a game engine core and a desktop toolchain. That is why Qt came to mind, and that instinct is reasonable.
+My honest take
+If your goals are:
+learn software design deeply
+build a reusable engine/toolkit
+have a serious desktop editor/workbench
+stay close to systems-level control
+use languages/tools you already know
+then C++ + Qt is a very defensible choice.
+If your goals are more like:
+get to a playable prototype fast
+make the editor quickly
+script/mod behavior easily
+avoid fighting C++ complexity
+then there are stacks that may be easier.
+C++ strengths here
+C++ is strong for this project because:
+deterministic simulation is easy to structure well
+value types and explicit ownership fit engine code nicely
+performance will be more than enough
+native desktop integration is solid
+you can separate engine/editor cleanly
+plugin or scripting embeddings are possible later
+But the real reason to use C++ here is not speed. A Chip’s Challenge clone does not need C++ for performance. The real advantages are:
+you already know it
+it supports strong architecture for a long-lived toolkit
+it gives you good control over data structures and boundaries
+That said, C++ also makes it easier to overcomplicate things and spend lots of time on plumbing.
+Qt strengths here
+Qt is especially attractive because your project is not just “a game.” It is also:
+an editor
+a workbench
+an asset/profile manager
+a simulator/debugger
+maybe an external-runner front end
+Qt is very good for desktop tools with:
+panels
+menus
+dock widgets
+file dialogs
+tree views
+property inspectors
+custom rendering widgets
+That is a much better fit for Qt than for many game-first frameworks.
+So if you imagine something like:
+level canvas
+tile palette
+ruleset profile editor
+simulation controls
+event trace/debug panel
+asset browser
+Qt fits naturally.
+The main downside of C++ + Qt
+The downside is not that it is “bad.” The downside is that it can become heavy:
+build system complexity
+object lifetime complexity
+UI boilerplate
+signals/slots mixed with your domain logic if you are not careful
+slower iteration than a scripting-heavy stack
+If you go this route, the biggest discipline you need is:
+keep Qt out of the engine core.
+That means:
+no QObject in core domain types
+no QPixmap in rules/board/entities
+no Qt containers unless you consciously want them there
+Qt lives in adapters/UI/app layers
+If you do that, C++ + Qt stays pretty clean.
+Better alternatives, depending on your goals
+1. C# + Godot
+This is probably the strongest non-C++ alternative if you want faster development.
+Why it could be better:
+quicker UI and rendering iteration
+scene tools and asset workflows
+easier scripting/modding direction
+C# is less cumbersome than C++
+editor-style tooling is still possible
+Why it could be worse:
+desktop workbench/editor UIs are less natural than in Qt
+less “tool application” feel than a real desktop framework
+external compatibility/import-export tool workflows may feel more improvised
+if you care a lot about a clean engine/tool separation, you have to enforce it yourself
+This is a strong choice if your center of gravity is “game with tools.”
+2. C# + Avalonia or WPF
+If the project is really more of a desktop toolkit with a simulation engine, C# plus a desktop UI framework is a serious contender.
+Why it could be better:
+much faster UI/editor development
+easier serialization, reflection, tooling
+easier scripting integration story
+less friction than C++
+very good for inspectors/property grids/document-based editors
+Why it could be worse:
+WPF is Windows-first
+Avalonia is cross-platform, but the ecosystem is smaller than Qt
+less natural for low-level engine experimentation if you specifically want C++
+This is a very good choice if your favorite outcome is “professional-feeling editor/workbench.”
+3. Python + Qt / PySide
+This could be excellent for a prototype, especially for the editor/workbench.
+Why it could be better:
+very fast iteration
+scripting comes almost for free
+editor/workbench features are much easier to build
+import/export and tooling tasks are pleasant
+Why it could be worse:
+the codebase can get messy if the project grows
+packaging and deployment can be more annoying
+simulation performance is still probably fine here, but architecture quality depends on discipline
+less satisfying if your goal is to practice C++ design
+This is a strong option if the main challenge is tool design rather than engine performance.
+4. Rust + egui / iced / Qt bindings
+This is attractive on paper, but I would not recommend it unless you specifically want to learn Rust as part of the project.
+You would likely spend too much effort on the stack rather than the game/toolkit itself.
+My actual recommendation
+Given what you said, I would recommend one of these two:
+Best for your stated goals
+C++ + Qt
+Use this if:
+you want to grow in design/architecture
+you already know C++ well
+you want a real editor/workbench
+you care about a reusable engine core
+you are okay with more setup and slower iteration
+Best for faster progress
+C# + desktop/UI framework
+Either Godot+C# or Avalonia+C# depending on whether game-side or tool-side matters more.
+Use this if:
+you want to move faster
+you want easier scripting and tooling
+you do not specifically need C++
+you want less architectural friction
+So: are there better tools? Yes, depending on priority. But C++ + Qt is not a bad pick at all. In fact, for a desktop-heavy toolkit/editor, it may be one of the better ones.
+About “efficiency more precisely”
+That is true, but I would be careful not to overweight it.
+This project is unlikely to be bottlenecked by raw compute unless you do something unusual like:
+giant batch simulations
+heavy search/solver systems
+very large levels with many actors
+complex scripting overhead
+For ordinary play/editor simulation, even much higher-level stacks would probably be fast enough.
+So choose C++ because:
+you like it
+you know it
+it matches the architecture you want
+not because the game needs extreme optimization.
+About applying simulation changes back into the level
+That is a really interesting idea, and yes, I think it can be worth doing — but only if you define the semantics carefully.
+Because there are two very different kinds of runtime changes:
+1. Authorial edits discovered through simulation
+Example:
+“this block position is better”
+“this monster should start one tile left”
+“this trap connection should be changed”
+“I want the level to begin from this adjusted setup”
+These are meaningful edits to the LevelDefinition.
+2. Ephemeral play-state changes
+Example:
+collected keys
+toggled buttons
+opened doors during play
+moved monsters mid-run
+temporary inventory state
+current timer
+current RNG state
+These usually should not be written back directly as authored level content.
+So you need a way to distinguish:
+changes that are design edits
+changes that are just consequences of playing
+That distinction is the heart of the feature.
+A good model for this
+I would think in terms of:
+LevelDefinition: authored source of truth
+LevelState: runtime state derived from it
+EditableProjection or StagedEdits: a set of author-approved changes extracted from runtime
+Then simulation can offer commands like:
+“Use current actor positions as new starting positions”
+“Apply tile changes made during simulation”
+“Keep trap/cloner rewiring”
+“Discard inventory/time/progress state”
+“Promote selected runtime changes to level definition”
+That is better than blindly committing all of LevelState back into LevelDefinition.
+The safest approach
+The safest and cleanest way is exactly what you suggested: staging changes before commit.
+A workflow could be:
+User runs simulation from the editor.
+During simulation, they make live edits or observe desirable resulting states.
+The system computes a diff between original LevelDefinition and a candidate authored state.
+The diff is shown in a review panel.
+User chooses which changes to apply.
+Conflicts/overwrites are confirmed.
+Selected changes are committed.
+That is a very strong design.
+The important part
+Do not think of it as “commit simulation state.”
+Think of it as:
+extract authorable edits from a simulation session.
+That framing makes the feature much easier to reason about.
+A useful way to structure those staged changes
+You could represent them as edit operations, like:
+SetTerrainTile(x, y, tileId)
+SetActorStartPosition(actorId, pos)
+AddActor(...)
+RemoveActor(actorId)
+SetLink(buttonId, targetId)
+ChangeTileProperty(tileId, property, value)
+Then the editor already knows how to apply them, undo them, preview them, and serialize them.
+This also fits neatly with undo/redo.
+So instead of pushing raw runtime state back into the level, you generate a set of editor commands.
+That is much more robust.
+When this feature is worth it
+It is worth it if you expect workflows like:
+simulate a puzzle and tweak monster/block starts interactively
+set up contraptions by moving things into place
+test timings and preserve the improved arrangement
+design from emergent interactions rather than from static editing only
+It is probably not worth implementing early if you are still trying to get:
+core engine
+basic editor
+ruleset separation
+import/export
+working.
+So I would mark it as a strong phase 2 or phase 3 feature, not an MVP feature.
+My recommendation on stack and scope
+If you pick C++ + Qt, I would do this:
+make the engine pure C++
+make the editor/workbench Qt
+treat runtime-to-author edits as staged editor commands
+postpone full script/plugin support
+postpone “commit from simulation” until after basic simulation and editor are working
+That gives you a sane path.
+If you want, I can next sketch a concrete stack decision table for:
+C++ + Qt
+C# + Godot
+C# + Avalonia
+Python + Qt
+with tradeoffs specifically for your player/editor/workbench goals.
+Yeah, let's go with C++ + Qt. What roadmap should I expect, since there are a lot of mechanics and rules to implement and lots of other things that should be done? I probably don't need too much documentation for the CC-specific things, since that's all available online and my goal is not to replace existing resources
+A good roadmap for C++ + Qt here is less about “implement every CC mechanic in order” and more about building the project so that each stage leaves you with something real, testable, and reusable.
+Since your goal is not to replace the community’s CC documentation, your project docs can stay focused on:
+how your engine/toolkit is structured
+what your current compatibility target is
+what is implemented vs not
+how to extend it
+That keeps the scope sane.
+The overall shape
+I would split the roadmap into six tracks that advance together:
+Engine core
+Ruleset implementation
+Qt player UI
+Editor
+Compatibility/import-export
+Workbench/extensibility
+You do not want to do all of one track before touching the others. Instead, move in layers.
+Phase 0: Project setup and architecture skeleton
+Before implementing gameplay, set up the project structure so you do not have to rip it apart later.
+Goal
+Have a compilable workspace with clear module boundaries.
+Suggested structure
+Something like:
+cckit-core
+cckit-rules-ms
+cckit-ui-qt
+cckit-editor
+cckit-tests
+cckit-tools or cckit-workbench
+If that feels too big, combine some at first, but still keep a conceptual split.
+At this stage, create:
+LevelDefinition
+LevelState
+Board
+IRuleset
+TickResult
+GameEvent
+Tileset abstraction
+basic test harness
+Deliverable
+A project that builds, runs tests, and can instantiate an empty level.
+This phase is boring, but it is what makes the rest survivable.
+Phase 1: Minimal headless engine
+This is the most important phase.
+Goal
+Make a headless, deterministic simulation core with one tiny playable ruleset subset.
+No Qt graphics needed yet beyond maybe a debug print if you want one.
+Implement first
+Only enough mechanics to prove the architecture:
+rectangular board
+terrain + actor distinction
+player
+walls
+floor
+one collectible
+one exit
+simple move blocking
+win condition
+one-tick step function
+event emission
+Think: “Can a player move around a small level, collect required items, and exit?”
+Avoid for now
+monsters
+buttons/traps/cloners
+ice/force floors
+teleporters
+glitch handling
+animation
+sound
+editor
+Deliverable
+Automated tests like:
+player blocked by wall
+item collected
+exit locked before chip count met
+exit completes level after requirement met
+This gives you the simulation spine.
+Phase 2: Basic Qt player
+Now hook the engine to a minimal UI.
+Goal
+Be able to load a small hardcoded level and play it in a Qt window.
+Implement
+board view widget
+keyboard input
+simple rendering
+level reset
+status bar with inventory/chip count/time if needed
+tick stepping or frame loop
+Use ugly placeholder graphics if needed. Do not wait for proper tiles.
+Important rule
+Qt consumes engine events and displays engine state.
+Qt should not define game logic.
+Deliverable
+A tiny playable prototype.
+This is a morale phase. It makes the project feel real.
+Phase 3: Core CC ruleset slice
+Now expand from “generic tile game” into a real CC-compatible subset.
+Goal
+Implement the most foundational CC mechanics cleanly.
+Suggested order
+I would do these in roughly this order:
+Static progression mechanics
+chips / socket
+keys / doors
+boots
+hazards like water/fire if your target ruleset needs them early
+Push/interact basics
+movable blocks
+block push rules
+simple occupancy/conflict rules
+Board-affecting mechanisms
+buttons
+traps
+cloners
+Motion-affecting terrain
+ice
+force floors
+slide mechanics
+directional constraints
+Advanced movement spaces
+teleporters
+thin walls / special directional blockers
+toggle walls if relevant
+Enemies
+Start with one or two simple monsters first, then the rest.
+Do not try to implement all monsters at once. Each monster is really a movement policy plus interaction semantics.
+Deliverable
+A playable subset that can handle a decent number of classic-style levels.
+Phase 4: Test suite and behavior locking
+This phase should begin early, but it becomes critical here.
+Goal
+Prevent the engine from turning into “it kinda works except in weird cases.”
+Add
+scenario-based tests
+movement-order tests
+interaction precedence tests
+regression tests for bug fixes
+level playback/input sequence tests
+For example:
+given this board and this input sequence, final state is X
+trap opens on tick N
+block enters water and becomes X
+teleporter destination resolution behaves as expected
+Very important
+As soon as you encounter a tricky rule, write a focused test before or while implementing it.
+Because once you get into:
+update ordering
+simultaneous-looking interactions
+historical quirks
+you will otherwise lose confidence in the engine.
+Deliverable
+A real compatibility test bed.
+Phase 5: Ruleset family + behavior profiles
+Once one concrete ruleset mostly works, then generalize.
+Not before.
+Goal
+Separate:
+ruleset family
+behavior profile
+presentation profile
+At this stage, refactor so you can express things like:
+MS ruleset + strict profile
+MS ruleset + patched profile
+Lynx ruleset + pedantic profile
+Even if only one or two combinations exist at first.
+Practical refactors
+movement ordering policy becomes swappable
+collision semantics become swappable
+teleporter behavior can vary by profile
+bug-compatibility flags move out of ad hoc conditionals
+Deliverable
+A system where compatibility quirks are configurable and testable instead of scattered.
+Phase 6: Real file support and compatibility adapters
+Only now would I seriously focus on external compatibility.
+Goal
+Import/export real CC-related formats and separate serialization from gameplay.
+Add
+level parser(s)
+pack metadata support
+tileset/resource mapping
+version/format adapters
+error reporting for unsupported constructs
+Keep separate
+file format compatibility
+simulation compatibility
+Those two will constantly tempt you to mix them. Resist that.
+Deliverable
+You can open external levels, play them in your engine, and eventually export supported subsets.
+Phase 7: Basic editor
+Once the engine and serialization are real enough, build the editor.
+Goal
+Support comfortable level authoring and testing.
+First editor features
+place/remove tiles
+set player/enemy starts
+palette of tiles
+save/load
+undo/redo
+property panel for special tiles/entities
+test current level in embedded simulation
+Structure
+Editor edits LevelDefinition, not LevelState.
+Test play creates a runtime copy.
+Deliverable
+A usable level editor with embedded playtest.
+Phase 8: In-editor simulation and staged commit-back
+This is where your earlier idea fits.
+Goal
+Allow simulation-assisted authoring without corrupting authored data.
+Add
+pause/run/step simulation
+inspect runtime state
+select runtime changes to preserve
+stage authorable diffs
+commit selected diffs to LevelDefinition
+Examples:
+keep new block start position
+preserve changed monster placement
+apply rewired linkages
+discard temporary inventory/time state
+Deliverable
+A powerful creator workflow that goes beyond a standard level editor.
+This is a very interesting differentiator for your project.
+Phase 9: Workbench for rulesets/tilesets
+This is where the project becomes the toolkit you originally imagined.
+Goal
+Allow people to define or derive content/rules without editing C++ source directly.
+Start with tilesets first
+Tilesets are safer and easier than rulesets.
+Tileset workbench
+import sprite sheet
+map sprites to logical tile/entity IDs
+define palette organization
+animation metadata
+preview in player/editor
+Then ruleset profiles
+At first, let users configure:
+compatibility flags
+movement timing
+selected interaction policies
+enabled tile set
+win-condition variants
+Only later think about scripting custom rules.
+Deliverable
+Data-driven customization before full scripting.
+Phase 10: Scripting or plugin hooks
+This is late-stage.
+Goal
+Support deeper rule customization without hardcoding everything.
+Recommendation
+Start with a restricted scripting model:
+named hook points
+controlled access to state
+stable API surface
+Examples:
+onEnterTile
+onUseItem
+onActorBlocked
+onTickStart
+onTickEnd
+Do not start with “scripts can mutate anything.” That will make compatibility and debugging painful.
+Deliverable
+A stable extension story.
+What order should you implement mechanics in?
+For actual CC mechanics, I would use this order:
+Group 1: foundational
+movement into empty space
+walls
+collectible chips
+socket / exit
+keys / doors
+inventory basics
+Group 2: physical interactions
+pushable blocks
+water/fire interactions
+boots
+simple directional restrictions
+Group 3: control systems
+buttons
+traps
+cloners
+toggle mechanics
+Group 4: forced movement
+ice
+force floors
+slide continuation
+turning corners if applicable to target ruleset
+Group 5: transport/special topology
+teleporters
+special directional walls
+thin walls
+one-way effects
+Group 6: actors
+simple enemy movement
+chase logic
+random or semi-random movement if relevant
+enemy collision/player death resolution
+Group 7: quirks and compatibility
+update-order edge cases
+simultaneous resolution oddities
+glitch reproduction flags
+exact profile-specific semantics
+That keeps you from drowning in the weird stuff too early.
+What documentation you actually need
+You probably need less “mechanics explanation” and more “project explanation.”
+I would keep just five core docs.
+1. README
+Very short:
+what the project is
+current status
+how to build
+modules
+supported rulesets/features
+2. Architecture note
+A few pages at most:
+LevelDefinition vs LevelState
+engine vs Qt UI
+ruleset vs behavior profile vs tileset
+event flow
+3. Compatibility matrix
+Simple table:
+mechanic
+implemented?
+tested?
+supported profiles
+known differences
+This will be more useful than prose.
+4. Extension note
+How to add:
+a new tileset
+a new behavior profile
+maybe a new tile or actor behavior
+5. Testing note
+How scenario tests are structured.
+That is enough.
+A realistic milestone roadmap
+Here is the version I would actually follow.
+Milestone 1: Headless micro-engine
+2–6 weeks, depending on pace.
+board/state
+player movement
+item collection
+win condition
+tests
+Milestone 2: Minimal Qt player
+render board
+accept input
+reset level
+play tiny levels
+Milestone 3: Foundational CC subset
+chips/socket
+keys/doors
+blocks
+hazards
+boots
+Milestone 4: Interaction-heavy mechanics
+buttons
+traps
+cloners
+more terrain semantics
+Milestone 5: Forced movement + enemies
+ice
+force floors
+teleporters
+core monsters
+Milestone 6: Compatibility stabilization
+scenario tests
+behavior profiles
+tricky rule cleanup
+Milestone 7: File support
+import/export
+actual pack/level files
+error handling
+Milestone 8: Editor
+place tiles
+save/load
+embedded simulation
+Milestone 9: Simulation-assisted authoring
+staged diffs
+selective commit-back
+Milestone 10: Workbench/extensibility
+tileset authoring
+profile editing
+limited scripting
+What to postpone aggressively
+Postpone these until the core is stable:
+full plugin ABI system
+deep scripting
+multiple ruleset families at once
+polished art pipeline
+networked collaboration
+replacing community documentation
+external-player integration beyond simple launch/export
+every known historical glitch
+Those are all good ideas, just dangerous early.
+My strongest advice
+Pick one concrete compatibility target first.
+For example:
+“MS-style baseline”
+or
+“Lynx-style baseline”
+Then write the engine to allow later variation, but do not try to implement MS, Tile World, Lynx, and Pedantic Lynx all at once.
+That single decision will simplify almost everything:
+mechanic order
+tests
+level expectations
+profile design
+debugging
+First week recommendation
+If you want a very concrete starting plan, I would do this first:
+Create the project skeleton.
+Implement LevelDefinition, LevelState, Board, Position, Direction.
+Define IRuleset::step(...).
+Add GameEvent and TickResult.
+Implement movement into floor/wall.
+Add one collectible and one exit mechanic.
+Write 8–15 tests.
+Only then open a Qt window and render the board.
+That gives you the right spine before the fun complexity arrives.
+I can sketch a concrete folder structure and class list for Milestone 1 next.
+Yeah
+Here’s a solid Milestone 1 layout for C++ + Qt that keeps the core clean and gives you room to grow.
+Project structure
+You can start with one repo and a few top-level modules:
+cckit/
+  CMakeLists.txt
+  README.md
+  apps/
+    player_qt/
+      CMakeLists.txt
+      main.cpp
+  libs/
+    core/
+      CMakeLists.txt
+      include/cckit/core/
+      src/
+    rules_ms/
+      CMakeLists.txt
+      include/cckit/rules_ms/
+      src/
+  tests/
+    CMakeLists.txt
+    core/
+    rules_ms/
+For Milestone 1, you could even omit player_qt at first and just do core, rules_ms, and tests.
+Milestone 1 goal
+The target is:
+load or construct a tiny level in memory
+step the simulation deterministically
+support:
+floor
+wall
+player
+collectible chip
+socket/exit
+emit events
+test it thoroughly
+No Qt board yet. No monsters yet.
+Core concepts to define first
+I would keep the first pass very small.
+Value types
+These are the “boring but essential” types.
+Position
+Direction
+TileId
+ActorId
+LayerId or just fixed roles for now
+Example:
+struct Position {
+    int x;
+    int y;
+    bool operator==(const Position&) const = default;
+};
+enum class Direction {
+    Up,
+    Down,
+    Left,
+    Right
+};
+LevelDefinition vs LevelState
+This distinction is worth introducing immediately.
+LevelDefinition
+Author-time data. The blueprint.
+Contains:
+board dimensions
+initial terrain layout
+initial actor placements
+required chip count
+metadata if needed later
+LevelState
+Runtime mutable state.
+Contains:
+current terrain/board state
+current actor positions
+collected chip count
+inventory
+whether level is complete/failed
+tick count if needed
+This split will help later with editor simulation and reset.
+Suggested classes
+In core
+Position.hpp
+struct Position {
+    int x;
+    int y;
+};
+Direction.hpp
+enum class Direction {
+    Up,
+    Down,
+    Left,
+    Right
+};
+Position offset(Position p, Direction d);
+TileKind.hpp
+For Milestone 1, keep tiles simple.
+enum class TileKind {
+    Floor,
+    Wall,
+    Chip,
+    Socket,
+    Exit
+};
+You may later split “terrain” vs “items,” but for now this is fine.
+ActorKind.hpp
+enum class ActorKind {
+    Player
+};
+ActorState.hpp
+struct ActorState {
+    int id;
+    ActorKind kind;
+    Position pos;
+};
+LevelDefinition.hpp
+class LevelDefinition {
+public:
+    LevelDefinition(int width, int height);
+    int width() const;
+    int height() const;
+    TileKind tileAt(Position p) const;
+    void setTile(Position p, TileKind tile);
+    void setPlayerStart(Position p);
+    Position playerStart() const;
+    void setRequiredChips(int count);
+    int requiredChips() const;
+private:
+    int m_width;
+    int m_height;
+    std::vector<TileKind> m_tiles;
+    Position m_playerStart;
+    int m_requiredChips = 0;
+};
+LevelState.hpp
+class LevelState {
+public:
+    explicit LevelState(const LevelDefinition& def);
+    const ActorState& player() const;
+    ActorState& player();
+    TileKind tileAt(Position p) const;
+    void setTile(Position p, TileKind tile);
+    int collectedChips() const;
+    void addCollectedChip();
+    int requiredChips() const;
+    bool isComplete() const;
+    void markComplete();
+private:
+    int m_width;
+    int m_height;
+    std::vector<TileKind> m_tiles;
+    ActorState m_player;
+    int m_collectedChips = 0;
+    int m_requiredChips = 0;
+    bool m_complete = false;
+};
+This duplicates some data from LevelDefinition, which is okay for now.
+Events and step result
+This is a very good habit to establish early.
+GameEvent.hpp
+For Milestone 1:
+enum class GameEventType {
+    PlayerMoved,
+    MovementBlocked,
+    ChipCollected,
+    SocketOpened,
+    LevelCompleted
+};
+struct GameEvent {
+    GameEventType type;
+    Position pos{};
+};
+Later you can enrich this with actor IDs, source/destination, payloads, etc.
+TickResult.hpp
+struct TickResult {
+    std::vector<GameEvent> events;
+};
+Input action
+PlayerAction.hpp
+enum class PlayerActionType {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    Wait
+};
+struct PlayerAction {
+    PlayerActionType type;
+};
+This is better than directly passing directions because it scales nicely later.
+Ruleset interface
+IRuleset.hpp
+class IRuleset {
+public:
+    virtual ~IRuleset() = default;
+    virtual TickResult step(LevelState& state, const PlayerAction& action) = 0;
+};
+That is enough for now.
+First concrete ruleset
+In rules_ms, create something like:
+BasicMsRuleset.hpp
+class BasicMsRuleset : public IRuleset {
+public:
+    TickResult step(LevelState& state, const PlayerAction& action) override;
+private:
+    bool canEnter(TileKind tile, const LevelState& state) const;
+    Position targetPosition(Position from, const PlayerAction& action) const;
+};
+Expected behavior for Milestone 1
+moving into Wall is blocked
+moving into Floor succeeds
+moving into Chip succeeds and collects it
+moving into Socket:
+blocked if not enough chips
+otherwise acts like open passage or converts to floor
+moving into Exit:
+succeeds only if socket requirement satisfied
+marks level complete
+You do not need to mimic exact CC semantics yet. Just make a coherent baseline.
+Board storage
+For Milestone 1, keep storage simple:
+std::vector<TileKind> m_tiles;
+with index helper:
+int index(Position p) const {
+    return p.y * m_width + p.x;
+}
+Do not overbuild board/layer abstractions yet.
+If you want, you can still wrap it in a small Board class later.
+Suggested initial tests
+You want more tests than code at this stage.
+Core tests
+position offset works
+level definition stores and returns tiles correctly
+level state initializes from definition correctly
+Ruleset tests
+player moves onto floor
+player blocked by wall
+player collects chip
+chip tile is cleared after collection
+socket blocks before enough chips collected
+socket allows passage after enough chips collected
+exit does not complete early if your semantics forbid it
+exit completes when requirements met
+wait action does not move player
+If possible, make small helper builders for tests so they stay readable.
+A good testing style
+You might define a tiny helper in tests like:
+LevelDefinition makeLevel(std::initializer_list<std::string> rows);
+where characters map to tiles:
+# wall
+. floor
+C chip
+S socket
+E exit
+P player start
+That will make your tests much easier to read.
+Example:
+auto def = makeLevel({
+    "#####",
+    "#P.C#",
+    "#..S#",
+    "#..E#",
+    "#####"
+});
+That kind of helper is absolutely worth it.
+What not to add yet
+Avoid these in Milestone 1:
+inheritance hierarchy for each tile
+monster AI interfaces
+plugin system
+scripting
+serialization formats
+Qt signals in core
+dynamic layers
+glitch flags
+generic action buses
+undo/redo
+All of those can come later.
+Milestone 1 deliverables
+You should consider Milestone 1 done when you have:
+LevelDefinition
+LevelState
+IRuleset
+one concrete ruleset
+GameEvent
+TickResult
+10+ tests
+tiny console or test harness proving a level can be stepped
+That is enough foundation for the Qt prototype next.
+Recommended next milestone after this
+After Milestone 1, I would do a very small Qt viewer:
+render a grid
+show tiles as colors or text
+use arrow keys to send PlayerAction
+redraw after each step
+maybe show event log on the side
+No fancy art yet.
+One small design suggestion
+For early code, prefer plain structs/classes over pattern-heavy abstractions. For example:
+LevelDefinition
+LevelState
+BasicMsRuleset
+is better than immediately introducing:
+abstract tile factories
+behavior registries
+command buses
+service locators
+Start concrete, then extract abstractions once you feel the pressure.
+If you want, I can sketch the actual header/source list and a minimal CMake layout for this Milestone 1 structure next.
+Would it make sense to add a sort of version control to this system? I've seen levels like Hypercomplex Maze where the level designer included different versions of the same level in the set, and there was also You Can't Teach An Old Frog New Tricks where the designer released a set showing the development stages that they went through in designing the different parts of the level
+Yes — some kind of versioning/history system makes a lot of sense here.
+Not necessarily full Git-like source control inside the app, but definitely a notion of:
+level revisions
+branches/variants
+named snapshots
+diffable changes
+That fits both the practical editing workflow and the CC culture you’re describing, where alternate versions and design evolution can themselves be meaningful artifacts.
+Why it makes sense
+There are really two use cases here:
+1. Ordinary editor safety/productivity
+This is the normal tooling reason:
+undo mistakes
+recover old ideas
+compare two layouts
+try risky changes without losing work
+2. Intentional level lineage
+This is the creative/archive reason:
+“v1 of this puzzle”
+“harder remix”
+“development stages”
+“MS-compatible version” vs “Lynx-friendly version”
+documenting how a puzzle evolved
+That second use case is unusually strong for your project because puzzle design often involves many meaningful intermediate states, not just one final product.
+So I would absolutely include revision awareness in the architecture.
+But I would not start with “full version control”
+I would separate three things:
+1. Undo/redo
+Short-term editing history within the current session.
+2. Snapshots/revisions
+Persistent saved points in time for a level.
+3. Branches/variants
+Alternative continuations from an earlier revision.
+That is already enough to capture most of what you want, without implementing a full DVCS.
+A good mental model
+Think of a level not as one file, but as:
+a level identity
+plus a set of revisions
+plus optional variant relationships
+So instead of:
+level_17.dat
+you conceptually have:
+Level: Hypercomplex Maze
+Revision A
+Revision B
+Revision C
+Variant: “final pack version”
+Variant: “development stages”
+Variant: “MS-compatible tuning”
+That is much closer to how creators actually work.
+What I would recommend building
+Phase 1: command-based undo/redo
+This is the first and most important layer.
+If your editor changes are represented as edit operations, like:
+place tile
+remove tile
+move actor
+change connection
+modify property
+then undo/redo comes naturally.
+This is important even if you never add richer versioning.
+Phase 2: named snapshots
+Allow the user to save a revision with:
+name
+timestamp
+optional notes
+Examples:
+“before trap rework”
+“harder center section”
+“post playtest cleanup”
+This already gets you a lot of value.
+Phase 3: variant/branch support
+Allow a revision to spawn a child variant.
+Examples:
+“Version tuned for MS rules”
+“Less backtracking version”
+“Development stage 4”
+“Contest submission version”
+This is where your idea becomes especially compelling.
+How this could look in the UI
+You might eventually have a side panel with something like:
+Level: You Can’t Teach an Old Frog New Tricks
+Revision 1: Initial shell
+Revision 2: Added left wing
+Revision 3: Reworked frog loop
+Branch A: final release
+Branch B: development-history release
+Branch C: easier version
+And each revision could optionally show:
+note/description
+diff summary
+preview thumbnail
+compatible ruleset/profile
+That would be genuinely useful.
+This also connects well to your ruleset/profile idea
+Because versions are not only about geometry.
+A revision might differ in:
+layout
+actor placement
+trap/cloner links
+target ruleset/profile
+tileset/presentation
+author notes
+intended difficulty
+whether a known exploit is allowed/fixed
+So versioning could help support things like:
+one layout, multiple behavior profiles
+one puzzle idea, multiple implementations
+historical evolution of a puzzle
+preservation of design rationale
+That is actually a strong differentiator for your tool.
+What data model would make sense
+I would think in terms of:
+LevelDocument
+Represents the authored project-level object.
+Contains:
+metadata
+current working LevelDefinition
+revision history
+variant graph or tree
+maybe editor-only annotations
+LevelRevision
+An immutable saved snapshot.
+Contains:
+revision ID
+parent revision ID or IDs
+serialized LevelDefinition
+metadata
+notes
+timestamp
+maybe compatible ruleset/profile info
+LevelVariant
+You may not even need a separate type at first. A branch can just be a revision that continues from an earlier one.
+So you could model it simply as a revision graph, not just a linear list.
+Snapshot vs diff storage
+There are two implementation approaches.
+Option 1: full snapshots
+Each revision stores a full serialized LevelDefinition.
+Pros:
+simple
+easy to restore
+easy to export
+robust
+Cons:
+some duplication
+For levels, this duplication is probably fine. These files are tiny compared to modern storage.
+Option 2: diffs
+Store only changes between revisions.
+Pros:
+elegant
+compact
+potentially useful for comparisons
+Cons:
+more complex
+harder to debug
+harder to recover from corruption
+reconstructing old states is trickier
+For your project, I would strongly recommend:
+store full snapshots, compute diffs on demand
+That gives you simplicity and still lets you show “what changed.”
+Diffs would still be very useful
+Even if revisions are stored as snapshots, the UI can compute diffs like:
+12 tiles changed
+2 monsters moved
+1 trap link added
+required chip count changed from 24 to 20
+behavior profile changed from MS strict to patched
+That is much better than only having “save as version.”
+One especially nice use: simulation-assisted authoring
+This fits beautifully with the earlier idea of staged commit-back.
+A workflow could be:
+Start from Revision 12.
+Run simulation and make live edits.
+Extract staged authorable edits.
+Commit them as Revision 13 with note:
+“Adjusted block starting positions after playtest.”
+That gives a clean relationship between:
+simulation changes
+staged edits
+persistent level history
+So yes, these ideas reinforce each other.
+Would this be overkill?
+Not if you scope it correctly.
+What would be overkill:
+full merge conflict engine
+distributed source control
+multi-user concurrent editing
+Git clone inside the app
+What would be very reasonable:
+undo/redo
+save snapshot
+revision notes
+restore earlier revision
+duplicate from old revision into a new branch/variant
+diff two revisions
+That is a very practical feature set.
+One subtle point
+You should decide whether versioning is:
+A. per-level
+Each level has its own history.
+or
+B. per-pack/project
+The whole set evolves together.
+You may eventually want both, but I would start with per-level revision history, because the examples you gave are about the evolution of individual levels.
+A pack can still have top-level versions later, but per-level history feels like the more natural first feature.
+One good roadmap for this feature
+Early
+Implement:
+command-based undo/redo
+“Save Snapshot…”
+Mid
+Add:
+revision browser
+restore snapshot
+duplicate snapshot into new working copy
+diff summary
+Later
+Add:
+branching/variant tree
+notes/tags like “release,” “prototype,” “development stage”
+pack export that includes selected history or selected variants
+That would already support the “development stages release” idea very well.
+One compelling export idea
+You could even support exporting:
+just the latest version
+all tagged revisions
+a curated development-history pack
+That would make it easy for authors to intentionally publish:
+final levels
+archived alternates
+developmental timelines
+That seems very aligned with the examples you mentioned.
+My recommendation
+Yes, include versioning, but frame it as:
+revision history for authored levels, not “source control.”
+The first implementation should be:
+immutable snapshots
+notes
+restore
+diff
+optional branching later
+That gives you real creative and practical value without burying the project under infrastructure.
+The idea is strong enough that I would treat it as a genuine planned feature of the editor/workbench, just not as part of Milestone 1.
+I’d probably place it after:
+basic editor
+save/load
+undo/redo
+embedded simulation
+and before:
+advanced scripting/plugins
+If you want, I can sketch a simple revision model and example C++ classes for LevelDocument, LevelRevision, and revision diffs next.
